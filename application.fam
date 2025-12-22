@@ -3,7 +3,7 @@ App(
     appid="mitzi_panis",
 
     # What users will see when browsing apps
-    name="Panis - the grumpy bread",
+    name="Panis - a grumpy bread",
 
     # Description for the Flipper Application catalogue
     fap_description="A simple jump'n'run game where you control a grumpy bread",

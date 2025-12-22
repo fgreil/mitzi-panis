@@ -1,539 +1,304 @@
-/*
- * Panis - The Grumpy Bread Jump'n'Run Game
- * A simple side-scrolling platformer for Flipper Zero
- * 
- * Controls:
- *   Left/Right      - Move character
- *   Up (press)      - Small jump
- *   Up (hold)       - Big jump
- *   Back (hold)     - Exit game
- */
-
 #include <furi.h>
 #include <gui/gui.h>
 #include <input/input.h>
-#include <stdlib.h>
+#include <notification/notification_messages.h>
 
+// Include generated icon assets
 #include "panis_icons.h"
 
-// Logging tag for debugging
-#define TAG "Panis"
-
-/* ============================================================================
- * CONSTANTS AND DEFINITIONS
- * ========================================================================== */
-
-// Screen dimensions
+// Screen dimensions for Flipper Zero
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
 
-// Background map dimensions and positioning
-#define MAP_HEIGHT 60                    // Height of the background image
-#define MAP_WIDTH 748                    // Width of the full background (scrollable)
-#define MAP_Y 4                          // Y position to align map to bottom (64 - 60 = 4)
-#define TILE_WIDTH 128                   // Width of each background tile
-#define NUM_TILES 6                      // Number of background tiles (748/128 = 5.84, round up to 6)
+// PANIS configuration
+#define MOVEMENT_SPEED 4  // Pixels per frame
+#define GROUND_Y 59  // Y position of the ground line
 
-// Character sprite dimensions (adjust to match your actual sprite size)
-#define PANIS_WIDTH 10
-#define PANIS_HEIGHT 10
+// Jump physics
+#define GRAVITY 2
+#define SMALL_JUMP_VELOCITY -10
+#define BIG_JUMP_VELOCITY -14
+#define MAX_FALL_SPEED 10
+#define JUMP_HEIGHT_THRESHOLD 25  // Height to distinguish small/big jump
+#define DOUBLE_CLICK_MS 300  // Time window for double-click (milliseconds)
 
-// Character positioning
-#define GROUND_Y (SCREEN_HEIGHT - 8)     // Y position where character walks
-#define SCROLL_START_X 64                // X position where background starts scrolling
+// Map tile configuration
+#define TILE_WIDTH 128
+#define NUM_TILES 3  // map_tile_0, map_tile_1, map_tile_2
+#define TOTAL_MAP_WIDTH (TILE_WIDTH * NUM_TILES)
 
-// Physics constants
-#define GRAVITY 2                        // Downward acceleration per frame
-#define JUMP_VELOCITY_SHORT 8            // Initial upward velocity for short jump (~25px)
-#define JUMP_VELOCITY_LONG 12            // Initial upward velocity for long jump (~50px)
-#define MOVE_SPEED 2                     // Horizontal movement speed in pixels per frame
+// Character dimensions
+#define CHAR_WIDTH 10
+#define CHAR_HEIGHT 10
 
-/* ============================================================================
- * DATA STRUCTURES
- * ========================================================================== */
+// Scrolling thresholds
+#define START_SCROLL_X (SCREEN_WIDTH / 2)  // Start scrolling at 1/2 screen (64px)
+#define CHAR_START_X (SCREEN_WIDTH / 4)    // Character starts at 1/4 screen (32px)
 
-/**
- * @brief Character facing direction
- */
-typedef enum {
-    DirectionLeft,   // Character facing left (use bread_l.png)
-    DirectionRight   // Character facing right (use bread_r.png)
-} Direction;
-
-/**
- * @brief Jump state machine states
- */
-typedef enum {
-    JumpStateNone,    // Character is on the ground
-    JumpStateRising,  // Character is moving upward
-    JumpStateFalling  // Character is falling down (not currently used but available)
-} JumpState;
-
-/**
- * @brief Main game state structure
- * Contains all information about the current game state
- */
+// Game state structure
 typedef struct {
-    float x;                    // Character x position on screen (0 to SCREEN_WIDTH)
-    float y;                    // Character y position (GROUND_Y when standing)
-    float velocity_y;           // Vertical velocity (negative = moving up, positive = falling)
-    int map_offset_x;           // Background horizontal scroll offset (0 to MAP_WIDTH - SCREEN_WIDTH)
-    Direction direction;        // Which direction character is facing
-    JumpState jump_state;       // Current jump state
-    bool jump_button_held;      // Whether jump button is currently held
-    uint32_t jump_start_tick;   // Tick when jump started (for timing)
+    int world_x;           // Character's X position in the world (0 to TOTAL_MAP_WIDTH)
+    int screen_x;          // Character's X position on screen
+    int camera_x;          // Camera offset (how much the world is scrolled)
+    bool facing_right;     // True if facing right, false if facing left
+    bool running;          // Game loop control
+    int y_pos;             // Character Y position (0 = top)
+    int y_velocity;        // Vertical velocity
+    bool on_ground;        // True if character is on ground
+	uint32_t last_jump_time;  // Time of last jump press
+	NotificationApp* notifications;  // For vibration feedback
 } GameState;
 
-/* ============================================================================
- * INITIALIZATION FUNCTIONS
- * ========================================================================== */
+// Draw callback function
+static void draw_callback(Canvas* canvas, void* ctx) {
+    GameState* state = (GameState*)ctx;
+    canvas_clear(canvas);
 
-/**
- * @brief Initialize game state to starting values
- * @param state Pointer to GameState structure to initialize
- * 
- * Sets character at left side of screen on the ground, with no scrolling.
- */
-static void game_state_init(GameState* state) {
-    FURI_LOG_I(TAG, "Initializing game state");
+    // Calculate which tiles are visible
+    int first_tile = state->camera_x / TILE_WIDTH;
+    int last_tile = (state->camera_x + SCREEN_WIDTH) / TILE_WIDTH;
     
-    state->x = 10.0f;                    // Start character 10px from left edge
-    state->y = GROUND_Y;                 // Place character on ground
-    state->velocity_y = 0.0f;            // No vertical movement initially
-    state->map_offset_x = 0;             // Background starts at left edge
-    state->direction = DirectionRight;   // Character faces right initially
-    state->jump_state = JumpStateNone;   // Character is on ground
-    state->jump_button_held = false;     // Jump button not pressed
-    state->jump_start_tick = 0;          // No jump in progress
+    // Clamp tile indices
+    if(first_tile < 0) first_tile = 0;
+    if(last_tile >= NUM_TILES) last_tile = NUM_TILES - 1;
+
+    // Draw background tiles
+    for(int i = first_tile; i <= last_tile; i++) {
+        int tile_world_x = i * TILE_WIDTH;
+        int tile_screen_x = tile_world_x - state->camera_x;
+        
+        // Select the appropriate tile icon
+        const Icon* tile_icon = NULL;
+        switch(i) {
+            case 0:
+                tile_icon = &I_map_tile_0;
+                break;
+            case 1:
+                tile_icon = &I_map_tile_1;
+                break;
+            case 2:
+                tile_icon = &I_map_tile_2;
+                break;
+        }
+        
+        if(tile_icon != NULL) {
+            canvas_draw_icon(canvas, tile_screen_x, 0, tile_icon);
+        }
+    }
+	// Draw ground line
+    canvas_draw_line(canvas, 0, GROUND_Y, SCREEN_WIDTH - 1, GROUND_Y);	
+
+    // Draw character PANIS 
+    const Icon* char_icon = state->facing_right ? &I_bread_r : &I_bread_l;
+    canvas_draw_icon(canvas, state->screen_x, state->y_pos, char_icon);
+
+    // Draw debug info in upper left
+    char debug_str[64];
     
-    FURI_LOG_I(TAG, "Game state initialized");
+    // Line 1: Tiles visible
+    snprintf(debug_str, sizeof(debug_str), "T:%d-%d", first_tile, last_tile);
+    canvas_set_font(canvas, FontSecondary);
+    canvas_draw_str(canvas, 0, 8, debug_str);
+    
+    // Line 2: World X position
+    snprintf(debug_str, sizeof(debug_str), "WX:%d", state->world_x);
+    canvas_draw_str(canvas, 0, 16, debug_str);
+  
+    // Line 3: Screen X position
+    snprintf(debug_str, sizeof(debug_str), "SX:%d", state->screen_x);
+    canvas_draw_str(canvas, 0, 24, debug_str);
 }
 
-/* ============================================================================
- * INPUT CALLBACK FUNCTIONS
- * ========================================================================== */
-
-/**
- * @brief Input event callback - forwards input events to message queue
- * @param input_event Pointer to input event from the system
- * @param ctx Context pointer (FuriMessageQueue in this case)
- * 
- * This is called by the system whenever a button is pressed/released.
- * We simply forward the event to our queue for processing in the main loop.
- */
+// Input callback function
 static void input_callback(InputEvent* input_event, void* ctx) {
+    furi_assert(ctx);
     FuriMessageQueue* event_queue = ctx;
     furi_message_queue_put(event_queue, input_event, FuriWaitForever);
 }
 
-/* ============================================================================
- * GAME LOGIC FUNCTIONS
- * ========================================================================== */
-
-/**
- * @brief Update game physics each frame
- * @param state Pointer to current game state
- * 
- * Handles:
- * - Applying gravity to character
- * - Updating vertical position based on velocity
- * - Detecting ground collision and landing
- */
-static void game_update(GameState* state) {
-    // Apply gravity when character is in the air (jumping or falling)
-    if(state->jump_state != JumpStateNone) {
-        // Increase downward velocity (gravity pulls character down)
-        state->velocity_y += GRAVITY;
-        
-        // Update vertical position based on velocity
-        // Negative velocity = moving up, positive = falling down
-        state->y += state->velocity_y;
-
-        // Check if character has landed on the ground
-        if(state->y >= GROUND_Y) {
-            state->y = GROUND_Y;              // Snap to ground level
-            state->velocity_y = 0.0f;         // Stop vertical movement
-            state->jump_state = JumpStateNone; // Return to ground state
+// Apply gravity and update Y position
+static void update_physics(GameState* state) {
+    // Apply gravity
+    if(!state->on_ground) {
+        state->y_velocity += GRAVITY;
+        if(state->y_velocity > MAX_FALL_SPEED) {
+            state->y_velocity = MAX_FALL_SPEED;
         }
+    }
+    state->y_pos += state->y_velocity; // Update Y position
+    // Ground collision
+    int ground_pos = GROUND_Y - CHAR_HEIGHT;
+    if(state->y_pos >= ground_pos) {
+        state->y_pos = ground_pos;
+        state->y_velocity = 0;
+        state->on_ground = true;
+    } else {
+        state->on_ground = false;
     }
 }
 
-/**
- * @brief Handle horizontal movement (left/right)
- * @param state Pointer to current game state
- * @param key Which key was pressed (InputKeyLeft or InputKeyRight)
- * @param type Type of input (Press, Repeat, etc.) - unused but kept for consistency
- * 
- * Movement logic:
- * - When moving right:
- *   1. Character moves from x=0 to x=64 (background stays still)
- *   2. At x=64, background scrolls instead (character stays at x=64)
- *   3. When background fully scrolled, character can move to right edge
- * 
- * - When moving left (reverse of above):
- *   1. If at right edge and background fully scrolled, move character left
- *   2. When character at x=0, scroll background left
- *   3. When background at left edge, stop
- */
-static void handle_movement(GameState* state, InputKey key, InputType type) {
-    UNUSED(type);  // Parameter kept for API consistency but not used in function
-    
-    if(key == InputKeyLeft) {
-        // Update sprite direction
-        state->direction = DirectionLeft;
+// Handle jump input
+static void handle_jump(GameState* state) {
+    if(state->on_ground) {
+        uint32_t current_time = furi_get_tick();
+        bool is_double_click = (current_time - state->last_jump_time) < DOUBLE_CLICK_MS;
         
-        // Scenario 1: Character is at left edge of screen (x=0) and background can scroll left
-        if(state->x <= 0 && state->map_offset_x > 0) {
-            // Scroll background left (reveals more of left side of map)
-            state->map_offset_x -= MOVE_SPEED;
-            if(state->map_offset_x < 0) {
-                state->map_offset_x = 0; // Clamp to left edge of map
-            }
-        } 
-        // Scenario 2: Character can move left on screen
-        else if(state->x > 0) {
-            // Move character left on screen
-            state->x -= MOVE_SPEED;
-            if(state->x < 0) {
-                state->x = 0; // Clamp to left edge of screen
-            }
-        }
-        // If character at left edge and map at left edge, can't move further left
-    } 
-    else if(key == InputKeyRight) {
-        // Update sprite direction
-        state->direction = DirectionRight;
+        // Double-click = big jump, single click = small jump
+        state->y_velocity = is_double_click ? BIG_JUMP_VELOCITY : SMALL_JUMP_VELOCITY;
         
-        // Calculate maximum scroll offset (when right edge of map aligns with right edge of screen)
-        int max_scroll = MAP_WIDTH - SCREEN_WIDTH;
-        
-        // Scenario 1: Character hasn't reached x=64 yet (and background not scrolled)
-        if(state->x < SCROLL_START_X && state->map_offset_x == 0) {
-            // Move character right on screen
-            state->x += MOVE_SPEED;
-            if(state->x > SCROLL_START_X) {
-                state->x = SCROLL_START_X; // Clamp to scroll start position
-            }
-        }
-        // Scenario 2: Character at x=64, scroll background instead
-        else if(state->x >= SCROLL_START_X && state->map_offset_x < max_scroll) {
-            // Scroll background right (reveals more of right side of map)
-            state->map_offset_x += MOVE_SPEED;
-            if(state->map_offset_x > max_scroll) {
-                state->map_offset_x = max_scroll; // Clamp to max scroll
-            }
-        }
-        // Scenario 3: Background fully scrolled, character can move to right edge
-        else if(state->map_offset_x >= max_scroll && state->x < SCREEN_WIDTH - PANIS_WIDTH) {
-            // Move character right toward screen edge
-            state->x += MOVE_SPEED;
-            if(state->x > SCREEN_WIDTH - PANIS_WIDTH) {
-                state->x = SCREEN_WIDTH - PANIS_WIDTH; // Clamp to right edge
-            }
-        }
-        // If at right edge of map and right edge of screen, can't move further right
+        state->last_jump_time = current_time;
+        state->on_ground = false;
     }
 }
 
-/**
- * @brief Handle jump input
- * @param state Pointer to current game state
- * @param type Type of input (Press, Long, Release)
- * 
- * Jump mechanics:
- * - Single press (InputTypePress): Small jump with velocity 8 (~25px height)
- * - Hold button (InputTypeLong): Big jump with velocity 12 (~50px height)
- * - Release early: Cuts jump short by reducing upward velocity
- */
-static void handle_jump(GameState* state, InputType type) {
-    // Start a short jump on button press (only if on ground)
-    if(type == InputTypePress && state->jump_state == JumpStateNone) {
-        state->jump_state = JumpStateRising;           // Enter jumping state
-        state->velocity_y = -JUMP_VELOCITY_SHORT;      // Negative velocity = upward motion
-        state->jump_button_held = true;                // Track that button is held
-        state->jump_start_tick = furi_get_tick();      // Record jump start time
-    } 
-    // Start a long jump when button held down (only if on ground)
-    else if(type == InputTypeLong && state->jump_state == JumpStateNone) {
-        state->jump_state = JumpStateRising;           // Enter jumping state
-        state->velocity_y = -JUMP_VELOCITY_LONG;       // Larger negative velocity = higher jump
-        state->jump_button_held = true;                // Track that button is held
-        state->jump_start_tick = furi_get_tick();      // Record jump start time
-    }
-    // Button released - allow variable jump height
-    else if(type == InputTypeRelease) {
-        state->jump_button_held = false;               // Button no longer held
+// Update horizontal movement logic
+static void update_game(GameState* state, InputKey key) {   
+	int old_world_x = state->world_x;
+    if(key == InputKeyRight) {
+        state->facing_right = true;
         
-        // If still moving upward when button released, cut the jump short
-        // This allows player to control jump height precisely
-        if(state->jump_state == JumpStateRising && state->velocity_y < 0) {
-            state->velocity_y *= 0.5f; // Reduce upward velocity by half
+        // Check if we can move right
+        if(state->world_x < TOTAL_MAP_WIDTH - CHAR_WIDTH) {
+            // Determine if we should scroll or move character
+            if(state->screen_x >= START_SCROLL_X && 
+               state->camera_x < TOTAL_MAP_WIDTH - SCREEN_WIDTH) {
+                // Scroll the world
+                state->camera_x += MOVEMENT_SPEED;
+                state->world_x += MOVEMENT_SPEED;
+                
+                // Clamp camera
+                if(state->camera_x > TOTAL_MAP_WIDTH - SCREEN_WIDTH) {
+                    int overflow = state->camera_x - (TOTAL_MAP_WIDTH - SCREEN_WIDTH);
+                    state->camera_x = TOTAL_MAP_WIDTH - SCREEN_WIDTH;
+                    state->screen_x += overflow;
+                }
+            } else {
+                // Move character on screen
+                state->screen_x += MOVEMENT_SPEED;
+                state->world_x += MOVEMENT_SPEED;
+                
+                // Clamp to screen edge
+                if(state->screen_x > SCREEN_WIDTH - CHAR_WIDTH) {
+                    state->screen_x = SCREEN_WIDTH - CHAR_WIDTH;
+                }
+            }
+            
+            // Clamp world position
+            if(state->world_x > TOTAL_MAP_WIDTH - CHAR_WIDTH) {
+                state->world_x = TOTAL_MAP_WIDTH - CHAR_WIDTH;
+            }
+        }
+    } else if(key == InputKeyLeft) {
+        state->facing_right = false;
+        
+        // Check if we can move left
+        if(state->world_x > 0) {
+            // Determine if we should scroll or move character
+            if(state->screen_x <= START_SCROLL_X && state->camera_x > 0) {
+                // Scroll the world (move camera left)
+                state->camera_x -= MOVEMENT_SPEED;
+                state->world_x -= MOVEMENT_SPEED;
+                
+                // Clamp camera
+                if(state->camera_x < 0) {
+                    int overflow = -state->camera_x;
+                    state->camera_x = 0;
+                    state->screen_x -= overflow;
+                }
+            } else {
+                // Move character on screen
+                state->screen_x -= MOVEMENT_SPEED;
+                state->world_x -= MOVEMENT_SPEED;
+                
+                // Clamp to screen edge
+                if(state->screen_x < 0) {
+                    state->screen_x = 0;
+                }
+            }
+            
+            // Clamp world position
+            if(state->world_x < 0) {
+                state->world_x = 0;
+            }
         }
     }
+   // Vibrate if we hit a boundary
+    if((old_world_x != state->world_x) && 
+       (state->world_x == 0 || state->world_x == TOTAL_MAP_WIDTH - CHAR_WIDTH)) {
+        notification_message(state->notifications, &sequence_single_vibro);
+    }
+	
 }
 
-/* ============================================================================
- * RENDERING FUNCTIONS
- * ========================================================================== */
-
-/**
- * @brief Draw the game screen
- * @param canvas Pointer to canvas to draw on
- * @param ctx Context pointer (GameState in this case)
- * 
- * Draws:
- * 1. Tiled scrolling background (map_tile_0.png through map_tile_5.png)
- * 2. Character sprite (bread_l.png or bread_r.png based on direction)
- * 3. Debug information
- */
-static void draw_callback(Canvas* canvas, void* ctx) {
-    static uint32_t draw_count = 0;
-    draw_count++;
-    
-    if(draw_count == 1) {
-        FURI_LOG_I(TAG, "draw_callback called for first time");
-    }
-    
-    GameState* state = ctx;
-    
-    // Safety check
-    if(state == NULL) {
-        FURI_LOG_E(TAG, "draw_callback: NULL state!");
-        return;
-    }
-    
-    if(canvas == NULL) {
-        FURI_LOG_E(TAG, "draw_callback: NULL canvas!");
-        return;
-    }
-    
-    // Clear previous frame
-    canvas_clear(canvas);
-    
-    // Draw tiled background
-    // Calculate which tiles are visible based on scroll offset
-    int first_tile = state->map_offset_x / TILE_WIDTH;
-    int last_tile = (state->map_offset_x + SCREEN_WIDTH) / TILE_WIDTH;
-    
-    // Clamp to valid tile range
-    if(first_tile < 0) first_tile = 0;
-    if(last_tile >= NUM_TILES) last_tile = NUM_TILES - 1;
-    
-    if(draw_count == 1) {
-        FURI_LOG_I(TAG, "Drawing tiles %d to %d (offset=%d)", first_tile, last_tile, state->map_offset_x);
-    }
-    
-    // Draw each visible tile
-    for(int tile_idx = first_tile; tile_idx <= last_tile; tile_idx++) {
-        // Calculate where this tile should be drawn on screen
-        int tile_x = (tile_idx * TILE_WIDTH) - state->map_offset_x;
-        
-        // Select the appropriate tile icon
-        const Icon* tile_icon = NULL;
-        switch(tile_idx) {
-            case 0: tile_icon = &I_map_tile_0; break;
-            case 1: tile_icon = &I_map_tile_1; break;
-            case 2: tile_icon = &I_map_tile_2; break;
-            case 3: tile_icon = &I_map_tile_3; break;
-            case 4: tile_icon = &I_map_tile_4; break;
-            case 5: tile_icon = &I_map_tile_5; break;
-            default:
-                FURI_LOG_E(TAG, "Invalid tile index: %d", tile_idx);
-                continue;
-        }
-        
-        if(draw_count == 1) {
-            FURI_LOG_I(TAG, "  Drawing tile %d at x=%d", tile_idx, tile_x);
-        }
-        
-        // Draw the tile
-        canvas_draw_icon(canvas, tile_x, MAP_Y, tile_icon);
-    }
-    
-    if(draw_count == 1) {
-        FURI_LOG_I(TAG, "Background tiles drawn successfully");
-    }
-    
-    // Draw a ground line for reference
-    canvas_draw_line(canvas, 0, GROUND_Y, SCREEN_WIDTH, GROUND_Y);
-    
-    // Draw character sprite
-    if(draw_count == 1) {
-        FURI_LOG_I(TAG, "Drawing character sprite");
-    }
-    
-    const Icon* sprite = (state->direction == DirectionLeft) ? &I_bread_l : &I_bread_r;
-    canvas_draw_icon(canvas, (int)state->x, (int)state->y - PANIS_HEIGHT, sprite);
-    
-    if(draw_count == 1) {
-        FURI_LOG_I(TAG, "Character sprite drawn successfully");
-    }
-    
-    // Debug text overlay
-    char debug[64];
-    snprintf(debug, sizeof(debug), "X:%.0f Off:%d T:%d-%d", 
-             (double)state->x, state->map_offset_x, first_tile, last_tile);
-    canvas_set_font(canvas, FontSecondary);
-    canvas_draw_str(canvas, 0, 8, debug);
-}
-
-/* ============================================================================
- * MAIN APPLICATION
- * ========================================================================== */
-
-/**
- * @brief Main application entry point
- * @param p Unused parameter (required by Flipper Zero app interface)
- * @return int32_t Exit code (0 = success)
- * 
- * Application lifecycle:
- * 1. Initialize game state and allocate resources
- * 2. Set up GUI viewport and input handling
- * 3. Run main game loop (process input, update physics, render)
- * 4. Clean up and exit
- */
+// Main application entry point
 int32_t panis_main(void* p) {
     UNUSED(p);
     
-    FURI_LOG_I(TAG, "=== Panis Game Starting ===");
-    
-    /* ------------------------------------------------------------------------
-     * INITIALIZATION
-     * ---------------------------------------------------------------------- */
-    
-    FURI_LOG_I(TAG, "Allocating game state");
-    // Allocate and initialize game state
-    GameState* game_state = malloc(sizeof(GameState));
-    if(game_state == NULL) {
-        FURI_LOG_E(TAG, "Failed to allocate game state!");
-        return -1;
-    }
-    
-    game_state_init(game_state);
-    
-    FURI_LOG_I(TAG, "Creating event queue");
-    // Create message queue for input events
-    // Queue holds up to 8 events, each event is sizeof(InputEvent)
+    // Create event queue for input events
     FuriMessageQueue* event_queue = furi_message_queue_alloc(8, sizeof(InputEvent));
-    if(event_queue == NULL) {
-        FURI_LOG_E(TAG, "Failed to allocate event queue!");
-        free(game_state);
-        return -1;
-    }
     
-    FURI_LOG_I(TAG, "Creating viewport");
-    // Create viewport for rendering
+    // Initialize game state
+    GameState* state = malloc(sizeof(GameState));
+    state->world_x = CHAR_START_X;  // Start at 1/4 of screen width
+    state->screen_x = CHAR_START_X;
+    state->camera_x = 0;
+    state->facing_right = true;
+    state->running = true;
+    state->y_pos = GROUND_Y - CHAR_HEIGHT;
+    state->y_velocity = 0;
+    state->on_ground = true;
+	state->last_jump_time = 0;
+	state->notifications = furi_record_open(RECORD_NOTIFICATION);
+    
+    // Set up view port
     ViewPort* view_port = view_port_alloc();
-    view_port_draw_callback_set(view_port, draw_callback, game_state);
+    view_port_draw_callback_set(view_port, draw_callback, state);
     view_port_input_callback_set(view_port, input_callback, event_queue);
     
-    FURI_LOG_I(TAG, "Opening GUI");
-    // Register viewport with GUI system
+    // Register view port in GUI
     Gui* gui = furi_record_open(RECORD_GUI);
     gui_add_view_port(gui, view_port, GuiLayerFullscreen);
     
-    FURI_LOG_I(TAG, "Initialization complete, entering main loop");
-    
-    /* ------------------------------------------------------------------------
-     * MAIN GAME LOOP
-     * ---------------------------------------------------------------------- */
-    
+    // Main game loop
     InputEvent event;
-    bool running = true;
-    uint32_t frame_count = 0;
-    
-    FURI_LOG_I(TAG, "Entering while loop");
-    
-    while(running) {
-        if(frame_count == 0) {
-            FURI_LOG_I(TAG, "First iteration of main loop");
-        }
-        
-        // Process input events with 16ms timeout (approximately 60 FPS)
-        // This ensures the game continues updating even without input
-        FuriStatus queue_status = furi_message_queue_get(event_queue, &event, 16);
-        
-        if(frame_count == 0) {
-            FURI_LOG_I(TAG, "furi_message_queue_get returned, status=%d", queue_status);
-        }
-        
-        if(queue_status == FuriStatusOk) {
+    while(state->running) {
+        // Process input events
+        if(furi_message_queue_get(event_queue, &event, 100) == FuriStatusOk) {
+            // Handle back button
+            if(event.key == InputKeyBack && event.type == InputTypePress) {
+                state->running = false;
+                continue;
+            }
             
-            FURI_LOG_D(TAG, "Input: key=%d type=%d", event.key, event.type);
-            
-            // Back button - exit game (LONG PRESS)
-            if(event.key == InputKeyBack) {
-                if(event.type == InputTypeLong) {
-                    FURI_LOG_I(TAG, "Exit requested");
-                    running = false; // Exit main loop
-                }
-            } 
-            // Left/Right movement
-            else if(event.key == InputKeyLeft || event.key == InputKeyRight) {
-                // Process on press and repeat (for continuous movement when held)
-                if(event.type == InputTypePress || event.type == InputTypeRepeat) {
-                    handle_movement(game_state, event.key, event.type);
+            // Handle jumping
+            if(event.key == InputKeyUp) {
+                if(event.type == InputTypePress) {
+                   handle_jump(state);
                 }
             }
-            // Up button - jumping
-            else if(event.key == InputKeyUp) {
-                FURI_LOG_D(TAG, "Jump triggered");
-                // Handle all input types (Press, Long, Release) for variable jump height
-                handle_jump(game_state, event.type);
+            
+            // Handle horizontal movement
+            if((event.type == InputTypePress || event.type == InputTypeRepeat) &&
+               (event.key == InputKeyLeft || event.key == InputKeyRight)) {
+                update_game(state, event.key);
             }
         }
         
-        // Update game physics (gravity, collisions, etc.)
-        game_update(game_state);
+        // Update physics every frame (independent of input)
+        update_physics(state);
         
-        if(frame_count == 0) {
-            FURI_LOG_I(TAG, "game_update completed");
-        }
-        
-        // Request screen redraw with updated game state
-        if(frame_count == 0) {
-            FURI_LOG_I(TAG, "About to call first view_port_update");
-        }
+        // Request redraw
         view_port_update(view_port);
-        if(frame_count == 0) {
-            FURI_LOG_I(TAG, "First view_port_update completed");
-        }
-        
-        // Log every 60 frames (approximately every second at 60 FPS)
-        frame_count++;
-        if(frame_count == 1) {
-            FURI_LOG_I(TAG, "First frame completed, frame_count=%lu", frame_count);
-        }
-        if(frame_count % 60 == 0) {
-            FURI_LOG_I(TAG, "Running: frame=%lu x=%.1f y=%.1f offset=%d", 
-                       frame_count, (double)game_state->x, (double)game_state->y, game_state->map_offset_x);
-        }
     }
     
-    FURI_LOG_I(TAG, "Main loop exited");
-    
-    /* ------------------------------------------------------------------------
-     * CLEANUP
-     * ---------------------------------------------------------------------- */
-    
-    FURI_LOG_I(TAG, "Starting cleanup");
-    
-    // Remove viewport from GUI
-    FURI_LOG_I(TAG, "Removing viewport");
+    // Cleanup
+    view_port_enabled_set(view_port, false);
     gui_remove_view_port(gui, view_port);
-    
-    // Free viewport
     view_port_free(view_port);
-    
-    // Free message queue
-    furi_message_queue_free(event_queue);
-    
-    // Close GUI record
     furi_record_close(RECORD_GUI);
+	furi_record_close(RECORD_NOTIFICATION);
+    furi_message_queue_free(event_queue);
+    free(state);
     
-    // Free game state
-    free(game_state);
-    
-    FURI_LOG_I(TAG, "=== Panis Game Exited Successfully ===");
-    return 0; // Success
+    return 0;
 }
