@@ -29,8 +29,10 @@
 
 // Background map dimensions and positioning
 #define MAP_HEIGHT 60                    // Height of the background image
-#define MAP_WIDTH 748                    // Width of the background image (scrollable)
+#define MAP_WIDTH 748                    // Width of the full background (scrollable)
 #define MAP_Y 4                          // Y position to align map to bottom (64 - 60 = 4)
+#define TILE_WIDTH 128                   // Width of each background tile
+#define NUM_TILES 6                      // Number of background tiles (748/128 = 5.84, round up to 6)
 
 // Character sprite dimensions (adjust to match your actual sprite size)
 #define PANIS_WIDTH 10
@@ -280,7 +282,7 @@ static void handle_jump(GameState* state, InputType type) {
  * @param ctx Context pointer (GameState in this case)
  * 
  * Draws:
- * 1. Scrolling background (map_01.png) - TEMPORARILY DISABLED TO TEST
+ * 1. Tiled scrolling background (map_tile_0.png through map_tile_5.png)
  * 2. Character sprite (bread_l.png or bread_r.png based on direction)
  * 3. Debug information
  */
@@ -308,33 +310,51 @@ static void draw_callback(Canvas* canvas, void* ctx) {
     // Clear previous frame
     canvas_clear(canvas);
     
-    /* TEMPORARILY DISABLED - Background hangs due to large size (748px wide)
-    // Draw background with clipping
-    // The map is very wide (748px), so we use canvas clipping to only draw visible portion
-    if(draw_count == 1) {
-        FURI_LOG_I(TAG, "Setting up canvas clip for background");
-    }
+    // Draw tiled background
+    // Calculate which tiles are visible based on scroll offset
+    int first_tile = state->map_offset_x / TILE_WIDTH;
+    int last_tile = (state->map_offset_x + SCREEN_WIDTH) / TILE_WIDTH;
     
-    // Set clipping region to screen boundaries
-    canvas_set_clip(canvas, 0, MAP_Y, SCREEN_WIDTH, MAP_HEIGHT);
-    
-    int draw_x = -state->map_offset_x;
+    // Clamp to valid tile range
+    if(first_tile < 0) first_tile = 0;
+    if(last_tile >= NUM_TILES) last_tile = NUM_TILES - 1;
     
     if(draw_count == 1) {
-        FURI_LOG_I(TAG, "Drawing background at x=%d with clip enabled", draw_x);
+        FURI_LOG_I(TAG, "Drawing tiles %d to %d (offset=%d)", first_tile, last_tile, state->map_offset_x);
     }
     
-    canvas_draw_icon(canvas, draw_x, MAP_Y, &I_map_01);
+    // Draw each visible tile
+    for(int tile_idx = first_tile; tile_idx <= last_tile; tile_idx++) {
+        // Calculate where this tile should be drawn on screen
+        int tile_x = (tile_idx * TILE_WIDTH) - state->map_offset_x;
+        
+        // Select the appropriate tile icon
+        const Icon* tile_icon = NULL;
+        switch(tile_idx) {
+            case 0: tile_icon = &I_map_tile_0; break;
+            case 1: tile_icon = &I_map_tile_1; break;
+            case 2: tile_icon = &I_map_tile_2; break;
+            case 3: tile_icon = &I_map_tile_3; break;
+            case 4: tile_icon = &I_map_tile_4; break;
+            case 5: tile_icon = &I_map_tile_5; break;
+            default:
+                FURI_LOG_E(TAG, "Invalid tile index: %d", tile_idx);
+                continue;
+        }
+        
+        if(draw_count == 1) {
+            FURI_LOG_I(TAG, "  Drawing tile %d at x=%d", tile_idx, tile_x);
+        }
+        
+        // Draw the tile
+        canvas_draw_icon(canvas, tile_x, MAP_Y, tile_icon);
+    }
     
     if(draw_count == 1) {
-        FURI_LOG_I(TAG, "Background drawn, resetting clip");
+        FURI_LOG_I(TAG, "Background tiles drawn successfully");
     }
     
-    // Reset clipping to full screen
-    canvas_reset_clip(canvas);
-    */
-    
-    // Draw a simple ground line instead of background
+    // Draw a ground line for reference
     canvas_draw_line(canvas, 0, GROUND_Y, SCREEN_WIDTH, GROUND_Y);
     
     // Draw character sprite
@@ -351,11 +371,10 @@ static void draw_callback(Canvas* canvas, void* ctx) {
     
     // Debug text overlay
     char debug[64];
-    snprintf(debug, sizeof(debug), "X:%.0f Y:%.0f Off:%d", (double)state->x, (double)state->y, state->map_offset_x);
+    snprintf(debug, sizeof(debug), "X:%.0f Off:%d T:%d-%d", 
+             (double)state->x, state->map_offset_x, first_tile, last_tile);
     canvas_set_font(canvas, FontSecondary);
     canvas_draw_str(canvas, 0, 8, debug);
-    
-    canvas_draw_str(canvas, 0, 18, "Use arrows to move!");
 }
 
 /* ============================================================================
