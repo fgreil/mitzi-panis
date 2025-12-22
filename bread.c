@@ -6,18 +6,18 @@
  *   Left/Right      - Move character
  *   Up (press)      - Small jump
  *   Up (hold)       - Big jump
- *   Down (press)    - Toggle background music
  *   Back (hold)     - Exit game
  */
 
 #include <furi.h>
 #include <gui/gui.h>
 #include <input/input.h>
-#include <notification/notification.h>
-#include <notification/notification_messages.h>
 #include <stdlib.h>
 
 #include "panis_icons.h"
+
+// Logging tag for debugging
+#define TAG "Panis"
 
 /* ============================================================================
  * CONSTANTS AND DEFINITIONS
@@ -33,8 +33,8 @@
 #define MAP_Y 4                          // Y position to align map to bottom (64 - 60 = 4)
 
 // Character sprite dimensions (adjust to match your actual sprite size)
-#define PANIS_WIDTH 16
-#define PANIS_HEIGHT 16
+#define PANIS_WIDTH 10
+#define PANIS_HEIGHT 10
 
 // Character positioning
 #define GROUND_Y (SCREEN_HEIGHT - 8)     // Y position where character walks
@@ -45,25 +45,6 @@
 #define JUMP_VELOCITY_SHORT 8            // Initial upward velocity for short jump (~25px)
 #define JUMP_VELOCITY_LONG 12            // Initial upward velocity for long jump (~50px)
 #define MOVE_SPEED 2                     // Horizontal movement speed in pixels per frame
-
-// Music constants
-#define TEMPO_BPM 120                    // Beats per minute
-#define BEAT_DURATION_MS (60000 / TEMPO_BPM) // Duration of one beat in milliseconds
-
-// Note frequency definitions (in Hz) for standard musical notes
-#define NOTE_C4  262
-#define NOTE_D4  294
-#define NOTE_E4  330
-#define NOTE_F4  349
-#define NOTE_G4  392
-#define NOTE_A4  440
-#define NOTE_B4  494
-#define NOTE_C5  523
-#define NOTE_D5  587
-#define NOTE_E5  659
-#define NOTE_F5  698
-#define NOTE_G5  784
-#define NOTE_REST 0
 
 /* ============================================================================
  * DATA STRUCTURES
@@ -87,24 +68,6 @@ typedef enum {
 } JumpState;
 
 /**
- * @brief Note duration types for music
- * Based on 3/4 time signature at 120 BPM (500ms per beat)
- */
-typedef enum {
-    DurationEighth,      // e  = 1/2 beat = 250ms
-    DurationQuarter,     // q  = 1 beat   = 500ms
-    DurationDottedHalf   // dh = 3 beats  = 1500ms (full measure in 3/4)
-} NoteDuration;
-
-/**
- * @brief Musical note structure
- */
-typedef struct {
-    uint16_t frequency;      // Note frequency in Hz (0 = rest)
-    NoteDuration duration;   // Note duration
-} MusicNote;
-
-/**
  * @brief Main game state structure
  * Contains all information about the current game state
  */
@@ -117,64 +80,7 @@ typedef struct {
     JumpState jump_state;       // Current jump state
     bool jump_button_held;      // Whether jump button is currently held
     uint32_t jump_start_tick;   // Tick when jump started (for timing)
-    bool music_enabled;         // Whether background music is playing
 } GameState;
-
-/* ============================================================================
- * BACKGROUND MUSIC DATA
- * ========================================================================== */
-
-/**
- * Background music melody in 3/4 time, key of C
- * 
- * Original JSON notation:
- * Measure 1: ["Rest_q", "E4_e", "G4_e", "C5_e", "G4_e"]
- * Measure 2: ["G4_dh"]
- * Measure 3: ["G4_q", "E4_e", "G4_e", "C5_e", "G4_e"]
- * Measure 4: ["G4_dh"]
- */
-static const MusicNote background_melody[] = {
-    // Measure 1
-    {NOTE_REST, DurationQuarter},      // Rest_q
-    {NOTE_E4, DurationEighth},         // E4_e
-    {NOTE_G4, DurationEighth},         // G4_e
-    {NOTE_C5, DurationEighth},         // C5_e
-    {NOTE_G4, DurationEighth},         // G4_e
-    
-    // Measure 2
-    {NOTE_G4, DurationDottedHalf},     // G4_dh (3 beats)
-    
-    // Measure 3
-    {NOTE_G4, DurationQuarter},        // G4_q
-    {NOTE_E4, DurationEighth},         // E4_e
-    {NOTE_G4, DurationEighth},         // G4_e
-    {NOTE_C5, DurationEighth},         // C5_e
-    {NOTE_G4, DurationEighth},         // G4_e
-    
-    // Measure 4
-    {NOTE_G4, DurationDottedHalf},     // G4_dh (3 beats)
-};
-
-// Number of notes in the melody
-static const size_t melody_length = sizeof(background_melody) / sizeof(background_melody[0]);
-
-/**
- * @brief Convert note duration enum to milliseconds
- * @param duration Note duration type
- * @return uint32_t Duration in milliseconds
- */
-static uint32_t get_note_duration_ms(NoteDuration duration) {
-    switch(duration) {
-        case DurationEighth:
-            return BEAT_DURATION_MS / 2;  // Half beat = 250ms
-        case DurationQuarter:
-            return BEAT_DURATION_MS;       // One beat = 500ms
-        case DurationDottedHalf:
-            return BEAT_DURATION_MS * 3;   // Three beats = 1500ms
-        default:
-            return BEAT_DURATION_MS;
-    }
-}
 
 /* ============================================================================
  * INITIALIZATION FUNCTIONS
@@ -187,6 +93,8 @@ static uint32_t get_note_duration_ms(NoteDuration duration) {
  * Sets character at left side of screen on the ground, with no scrolling.
  */
 static void game_state_init(GameState* state) {
+    FURI_LOG_I(TAG, "Initializing game state");
+    
     state->x = 10.0f;                    // Start character 10px from left edge
     state->y = GROUND_Y;                 // Place character on ground
     state->velocity_y = 0.0f;            // No vertical movement initially
@@ -195,7 +103,8 @@ static void game_state_init(GameState* state) {
     state->jump_state = JumpStateNone;   // Character is on ground
     state->jump_button_held = false;     // Jump button not pressed
     state->jump_start_tick = 0;          // No jump in progress
-    state->music_enabled = true;         // Music starts enabled
+    
+    FURI_LOG_I(TAG, "Game state initialized");
 }
 
 /* ============================================================================
@@ -213,80 +122,6 @@ static void game_state_init(GameState* state) {
 static void input_callback(InputEvent* input_event, void* ctx) {
     FuriMessageQueue* event_queue = ctx;
     furi_message_queue_put(event_queue, input_event, FuriWaitForever);
-}
-
-/* ============================================================================
- * MUSIC PLAYER FUNCTIONS
- * ========================================================================== */
-
-/**
- * @brief Background music player thread
- * @param context Pointer to GameState
- * @return int32_t Thread exit code
- * 
- * Continuously loops through the background melody, playing each note.
- * Respects the music_enabled flag for toggling on/off.
- */
-static int32_t music_player_thread(void* context) {
-    GameState* state = context;
-    
-    // Get notification service for speaker control
-    NotificationApp* notifications = furi_record_open(RECORD_NOTIFICATION);
-    
-    size_t note_index = 0;  // Current position in melody
-    
-    while(true) {
-        // Check if music is enabled
-        if(state->music_enabled) {
-            // Get current note from melody
-            const MusicNote* note = &background_melody[note_index];
-            
-            // Calculate note duration in milliseconds
-            uint32_t duration_ms = get_note_duration_ms(note->duration);
-            
-            if(note->frequency == NOTE_REST) {
-                // Rest (silence)
-                furi_delay_ms(duration_ms);
-            } else {
-                // Play the note using notification API
-                // Create notification sequence for this note
-                const NotificationSequence sequence = {
-                    &message_note_c4,  // This will be overridden below
-                    &message_delay_10,
-                    NULL,
-                };
-                
-                // Calculate note message based on frequency
-                // Note: Flipper's notification system uses predefined notes
-                // We'll approximate by playing the note for the correct duration
-                
-                // Simple playback: use speaker to play frequency
-                // Note: This is a simplified version - Flipper has limited speaker API
-                notification_message(notifications, &sequence_single_vibro);
-                
-                // For proper note playback, we need to use the speaker directly
-                // This is a workaround - ideally use proper note messages
-                furi_hal_speaker_start(note->frequency, 1.0f);
-                furi_delay_ms(duration_ms);
-                furi_hal_speaker_stop();
-            }
-            
-            // Move to next note, loop back to start when melody ends
-            note_index++;
-            if(note_index >= melody_length) {
-                note_index = 0;
-            }
-        } else {
-            // Music disabled, just wait a bit before checking again
-            furi_delay_ms(100);
-        }
-        
-        // Allow thread to yield CPU
-        furi_thread_yield();
-    }
-    
-    furi_record_close(RECORD_NOTIFICATION);
-    return 0;
 }
 
 /* ============================================================================
@@ -325,7 +160,7 @@ static void game_update(GameState* state) {
  * @brief Handle horizontal movement (left/right)
  * @param state Pointer to current game state
  * @param key Which key was pressed (InputKeyLeft or InputKeyRight)
- * @param type Type of input (Press, Repeat, etc.)
+ * @param type Type of input (Press, Repeat, etc.) - unused but kept for consistency
  * 
  * Movement logic:
  * - When moving right:
@@ -339,6 +174,8 @@ static void game_update(GameState* state) {
  *   3. When background at left edge, stop
  */
 static void handle_movement(GameState* state, InputKey key, InputType type) {
+    UNUSED(type);  // Parameter kept for API consistency but not used in function
+    
     if(key == InputKeyLeft) {
         // Update sprite direction
         state->direction = DirectionLeft;
@@ -443,37 +280,82 @@ static void handle_jump(GameState* state, InputType type) {
  * @param ctx Context pointer (GameState in this case)
  * 
  * Draws:
- * 1. Scrolling background (map_01.png)
+ * 1. Scrolling background (map_01.png) - TEMPORARILY DISABLED TO TEST
  * 2. Character sprite (bread_l.png or bread_r.png based on direction)
- * 3. Optional debug information
+ * 3. Debug information
  */
 static void draw_callback(Canvas* canvas, void* ctx) {
+    static uint32_t draw_count = 0;
+    draw_count++;
+    
+    if(draw_count == 1) {
+        FURI_LOG_I(TAG, "draw_callback called for first time");
+    }
+    
     GameState* state = ctx;
+    
+    // Safety check
+    if(state == NULL) {
+        FURI_LOG_E(TAG, "draw_callback: NULL state!");
+        return;
+    }
+    
+    if(canvas == NULL) {
+        FURI_LOG_E(TAG, "draw_callback: NULL canvas!");
+        return;
+    }
     
     // Clear previous frame
     canvas_clear(canvas);
     
-    // Draw scrolling background
-    // The x position is negative offset to create scrolling effect
-    // As map_offset_x increases, the background moves left (revealing right side)
+    /* TEMPORARILY DISABLED - Background hangs due to large size (748px wide)
+    // Draw background with clipping
+    // The map is very wide (748px), so we use canvas clipping to only draw visible portion
+    if(draw_count == 1) {
+        FURI_LOG_I(TAG, "Setting up canvas clip for background");
+    }
+    
+    // Set clipping region to screen boundaries
+    canvas_set_clip(canvas, 0, MAP_Y, SCREEN_WIDTH, MAP_HEIGHT);
+    
     int draw_x = -state->map_offset_x;
+    
+    if(draw_count == 1) {
+        FURI_LOG_I(TAG, "Drawing background at x=%d with clip enabled", draw_x);
+    }
+    
     canvas_draw_icon(canvas, draw_x, MAP_Y, &I_map_01);
     
-    // Draw character sprite
-    // Choose sprite based on facing direction
-    const Icon* sprite = (state->direction == DirectionLeft) ? &I_bread_l : &I_bread_r;
+    if(draw_count == 1) {
+        FURI_LOG_I(TAG, "Background drawn, resetting clip");
+    }
     
-    // Draw at character position
-    // Subtract PANIS_HEIGHT because y coordinate is the character's feet position
+    // Reset clipping to full screen
+    canvas_reset_clip(canvas);
+    */
+    
+    // Draw a simple ground line instead of background
+    canvas_draw_line(canvas, 0, GROUND_Y, SCREEN_WIDTH, GROUND_Y);
+    
+    // Draw character sprite
+    if(draw_count == 1) {
+        FURI_LOG_I(TAG, "Drawing character sprite");
+    }
+    
+    const Icon* sprite = (state->direction == DirectionLeft) ? &I_bread_l : &I_bread_r;
     canvas_draw_icon(canvas, (int)state->x, (int)state->y - PANIS_HEIGHT, sprite);
     
-    // Optional: Draw debug information (uncomment to enable)
-    // Shows character position and scroll offset for debugging
-    /*
-    char debug[32];
-    snprintf(debug, sizeof(debug), "X:%.0f Y:%.0f Off:%d", state->x, state->y, state->map_offset_x);
+    if(draw_count == 1) {
+        FURI_LOG_I(TAG, "Character sprite drawn successfully");
+    }
+    
+    // Debug text overlay
+    char debug[64];
+    snprintf(debug, sizeof(debug), "X:%.0f Y:%.0f Off:%d", (double)state->x, (double)state->y, state->map_offset_x);
+    canvas_set_font(canvas, FontSecondary);
     canvas_draw_str(canvas, 0, 8, debug);
-    */
+    
+    canvas_draw_str(canvas, 0, 18, "Use arrows to move!");
 }
 
 /* ============================================================================
@@ -488,41 +370,50 @@ static void draw_callback(Canvas* canvas, void* ctx) {
  * Application lifecycle:
  * 1. Initialize game state and allocate resources
  * 2. Set up GUI viewport and input handling
- * 3. Start background music thread
- * 4. Run main game loop (process input, update physics, render)
- * 5. Clean up and exit
+ * 3. Run main game loop (process input, update physics, render)
+ * 4. Clean up and exit
  */
 int32_t panis_main(void* p) {
     UNUSED(p);
+    
+    FURI_LOG_I(TAG, "=== Panis Game Starting ===");
     
     /* ------------------------------------------------------------------------
      * INITIALIZATION
      * ---------------------------------------------------------------------- */
     
+    FURI_LOG_I(TAG, "Allocating game state");
     // Allocate and initialize game state
     GameState* game_state = malloc(sizeof(GameState));
+    if(game_state == NULL) {
+        FURI_LOG_E(TAG, "Failed to allocate game state!");
+        return -1;
+    }
+    
     game_state_init(game_state);
     
+    FURI_LOG_I(TAG, "Creating event queue");
     // Create message queue for input events
     // Queue holds up to 8 events, each event is sizeof(InputEvent)
     FuriMessageQueue* event_queue = furi_message_queue_alloc(8, sizeof(InputEvent));
+    if(event_queue == NULL) {
+        FURI_LOG_E(TAG, "Failed to allocate event queue!");
+        free(game_state);
+        return -1;
+    }
     
+    FURI_LOG_I(TAG, "Creating viewport");
     // Create viewport for rendering
     ViewPort* view_port = view_port_alloc();
     view_port_draw_callback_set(view_port, draw_callback, game_state);
     view_port_input_callback_set(view_port, input_callback, event_queue);
     
+    FURI_LOG_I(TAG, "Opening GUI");
     // Register viewport with GUI system
     Gui* gui = furi_record_open(RECORD_GUI);
     gui_add_view_port(gui, view_port, GuiLayerFullscreen);
     
-    // Start background music thread
-    FuriThread* music_thread = furi_thread_alloc();
-    furi_thread_set_name(music_thread, "PanisMusicPlayer");
-    furi_thread_set_stack_size(music_thread, 1024);
-    furi_thread_set_context(music_thread, game_state);
-    furi_thread_set_callback(music_thread, music_player_thread);
-    furi_thread_start(music_thread);
+    FURI_LOG_I(TAG, "Initialization complete, entering main loop");
     
     /* ------------------------------------------------------------------------
      * MAIN GAME LOOP
@@ -530,15 +421,31 @@ int32_t panis_main(void* p) {
     
     InputEvent event;
     bool running = true;
+    uint32_t frame_count = 0;
+    
+    FURI_LOG_I(TAG, "Entering while loop");
     
     while(running) {
+        if(frame_count == 0) {
+            FURI_LOG_I(TAG, "First iteration of main loop");
+        }
+        
         // Process input events with 16ms timeout (approximately 60 FPS)
         // This ensures the game continues updating even without input
-        if(furi_message_queue_get(event_queue, &event, 16) == FuriStatusOk) {
+        FuriStatus queue_status = furi_message_queue_get(event_queue, &event, 16);
+        
+        if(frame_count == 0) {
+            FURI_LOG_I(TAG, "furi_message_queue_get returned, status=%d", queue_status);
+        }
+        
+        if(queue_status == FuriStatusOk) {
+            
+            FURI_LOG_D(TAG, "Input: key=%d type=%d", event.key, event.type);
             
             // Back button - exit game (LONG PRESS)
             if(event.key == InputKeyBack) {
                 if(event.type == InputTypeLong) {
+                    FURI_LOG_I(TAG, "Exit requested");
                     running = false; // Exit main loop
                 }
             } 
@@ -551,41 +458,49 @@ int32_t panis_main(void* p) {
             }
             // Up button - jumping
             else if(event.key == InputKeyUp) {
+                FURI_LOG_D(TAG, "Jump triggered");
                 // Handle all input types (Press, Long, Release) for variable jump height
                 handle_jump(game_state, event.type);
-            }
-            // Down button - toggle background music
-            else if(event.key == InputKeyDown) {
-                if(event.type == InputTypePress) {
-                    // Toggle music on/off
-                    game_state->music_enabled = !game_state->music_enabled;
-                    
-                    // Stop speaker immediately when disabling music
-                    if(!game_state->music_enabled) {
-                        furi_hal_speaker_stop();
-                    }
-                }
             }
         }
         
         // Update game physics (gravity, collisions, etc.)
         game_update(game_state);
         
+        if(frame_count == 0) {
+            FURI_LOG_I(TAG, "game_update completed");
+        }
+        
         // Request screen redraw with updated game state
+        if(frame_count == 0) {
+            FURI_LOG_I(TAG, "About to call first view_port_update");
+        }
         view_port_update(view_port);
+        if(frame_count == 0) {
+            FURI_LOG_I(TAG, "First view_port_update completed");
+        }
+        
+        // Log every 60 frames (approximately every second at 60 FPS)
+        frame_count++;
+        if(frame_count == 1) {
+            FURI_LOG_I(TAG, "First frame completed, frame_count=%lu", frame_count);
+        }
+        if(frame_count % 60 == 0) {
+            FURI_LOG_I(TAG, "Running: frame=%lu x=%.1f y=%.1f offset=%d", 
+                       frame_count, (double)game_state->x, (double)game_state->y, game_state->map_offset_x);
+        }
     }
+    
+    FURI_LOG_I(TAG, "Main loop exited");
     
     /* ------------------------------------------------------------------------
      * CLEANUP
      * ---------------------------------------------------------------------- */
     
-    // Stop music and clean up music thread
-    game_state->music_enabled = false;
-    furi_hal_speaker_stop();
-    furi_thread_join(music_thread);
-    furi_thread_free(music_thread);
+    FURI_LOG_I(TAG, "Starting cleanup");
     
     // Remove viewport from GUI
+    FURI_LOG_I(TAG, "Removing viewport");
     gui_remove_view_port(gui, view_port);
     
     // Free viewport
@@ -600,5 +515,6 @@ int32_t panis_main(void* p) {
     // Free game state
     free(game_state);
     
+    FURI_LOG_I(TAG, "=== Panis Game Exited Successfully ===");
     return 0; // Success
 }
