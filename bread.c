@@ -17,10 +17,11 @@
 // Jump physics
 #define GRAVITY 2
 #define SMALL_JUMP_VELOCITY -10
-#define BIG_JUMP_VELOCITY -14
+#define BIG_JUMP_VELOCITY -20
 #define MAX_FALL_SPEED 10
+#define MAX_JUMP_HEIGHT 60  // Maximum pixels above ground
 #define JUMP_HEIGHT_THRESHOLD 25  // Height to distinguish small/big jump
-#define DOUBLE_CLICK_MS 300  // Time window for double-click (milliseconds)
+#define DOUBLE_CLICK_MS 900  // Time window for double-click (milliseconds)
 
 // Map tile configuration
 #define TILE_WIDTH 128
@@ -126,6 +127,13 @@ static void update_physics(GameState* state) {
         }
     }
     state->y_pos += state->y_velocity; // Update Y position
+    // Limit maximum jump height
+    int max_height_y = GROUND_Y - CHAR_HEIGHT - MAX_JUMP_HEIGHT;
+    if(state->y_pos < max_height_y) {
+        state->y_pos = max_height_y;
+        state->y_velocity = 0;  // Stop upward movement
+    }
+	
     // Ground collision
     int ground_pos = GROUND_Y - CHAR_HEIGHT;
     if(state->y_pos >= ground_pos) {
