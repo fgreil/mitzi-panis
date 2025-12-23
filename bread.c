@@ -66,6 +66,7 @@ typedef struct {
     int score;             // Collected pills score
     int block_count;       // Number of blocks in grid
     int pill_count;        // Number of pills remaining
+    bool grid_view_enabled; // True when down button is held
 } GameState;
 
 // Helper function for vibration feedback
@@ -195,6 +196,52 @@ static bool check_ground_support(GameState* state, int world_x, int y_pos) {
     return false;
 }
 
+// Draw the grid overlay when enabled
+static void draw_grid_overlay(Canvas* canvas, GameState* state) {
+    // Set font for labels
+    canvas_set_font(canvas, FontSecondary);
+    
+    // Calculate which columns are visible on screen
+    int first_col = state->camera_x / CELL_SIZE;
+    int last_col = (state->camera_x + SCREEN_WIDTH) / CELL_SIZE + 1;
+    
+    // Clamp to grid boundaries
+    if(first_col < 0) first_col = 0;
+    if(last_col >= GRID_COLS) last_col = GRID_COLS;
+    
+    // Draw vertical lines for each column
+    for(int col = first_col; col <= last_col; col++) {
+        int world_x = col * CELL_SIZE;
+        int screen_x = world_x - state->camera_x;
+        
+        // Only draw if on screen
+        if(screen_x >= 0 && screen_x < SCREEN_WIDTH) {
+            canvas_draw_line(canvas, screen_x, 0, screen_x, SCREEN_HEIGHT - 1);
+            
+            // Draw column number label at every 5th column in row 1 (2nd row from top)
+            if(col % 5 == 0) {
+                char label[8];
+                snprintf(label, sizeof(label), "%d", col);
+                
+                // Position label in the center of the cell in row 1
+                int label_x = screen_x + 2;  // Small offset from left edge
+                int label_y = CELL_SIZE + 7;  // Row 1, vertically centered
+                
+                // Only draw if label fits on screen
+                if(label_x >= 0 && label_x < SCREEN_WIDTH - 10) {
+                    canvas_draw_str(canvas, label_x, label_y, label);
+                }
+            }
+        }
+    }
+    
+    // Draw horizontal lines for each row
+    for(int row = 0; row <= GRID_ROWS; row++) {
+        int y = row * CELL_SIZE;
+        canvas_draw_line(canvas, 0, y, SCREEN_WIDTH - 1, y);
+    }
+}
+
 // Draw callback function
 static void draw_callback(Canvas* canvas, void* ctx) {
     GameState* state = (GameState*)ctx;
@@ -230,6 +277,11 @@ static void draw_callback(Canvas* canvas, void* ctx) {
         if(tile_icon != NULL) {
             canvas_draw_icon(canvas, tile_screen_x, 0, tile_icon);
         }
+    }
+    
+    // Draw grid overlay if enabled
+    if(state->grid_view_enabled) {
+        draw_grid_overlay(canvas, state);
     }
     
     // Draw grid cells (blocks and pills)
@@ -500,6 +552,7 @@ int32_t panis_main(void* p) {
     state->on_ground = true;
     state->last_jump_time = 0;
     state->notifications = furi_record_open(RECORD_NOTIFICATION);
+    state->grid_view_enabled = false;  // Grid view starts disabled
     
     // Initialize collision grid
     init_grid(state);
@@ -522,6 +575,15 @@ int32_t panis_main(void* p) {
             if(event.key == InputKeyBack && event.type == InputTypePress) {
                 state->running = false;
                 continue;
+            }
+            
+            // Handle grid view toggle with down button
+            if(event.key == InputKeyDown) {
+                if(event.type == InputTypePress) {
+                    state->grid_view_enabled = true;
+                } else if(event.type == InputTypeRelease) {
+                    state->grid_view_enabled = false;
+                }
             }
             
             // Handle jumping
