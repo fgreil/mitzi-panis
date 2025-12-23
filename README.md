@@ -1,5 +1,5 @@
 # mitzi-panis
-A grumpy bread walking around.
+A grumpy bread walking and jumping around.
 
 ## Controls
 - **Left/Right:** Move Panis left or right
@@ -15,8 +15,7 @@ When the right edge of the map reaches the screen edge, Panis can continue movin
    * Row 0 is in the sky, Row 5 is on the ground
    * Cell types: 0=empty, 1=block, 2=pill
 - Initialization `init_grid`
-   * 90% empty cells
-   * 2% random blocks floating in air (rows 0-4)
-   * 8% blocks on/near ground (stacked from row 5)
-   * 5% collectable pills distributed randomly
+   * 0.5% random blocks floating in air (rows 0-4)
+   * 5% blocks on/near ground (stacked from row 5)
+   * 2% collectable pills distributed randomly
 
