@@ -1,4 +1,5 @@
 #include <furi.h>
+#include <furi_hal.h>
 #include <gui/gui.h>
 #include <input/input.h>
 #include <notification/notification_messages.h>
@@ -67,11 +68,86 @@ typedef struct {
     int block_count;       // Number of blocks in grid
     int pill_count;        // Number of pills remaining
     bool grid_view_enabled; // True when down button is held
+	FuriThread* melody_thread; // Thread for playing melody
 } GameState;
 
 // Helper function for vibration feedback
 static void trigger_vibration(GameState* state) {
     notification_message(state->notifications, &sequence_single_vibro);
+}
+
+
+
+// Helper function for melody 'Little things'
+void play_melody(void) {
+    // Melody: frequency (Hz), duration (ms)
+    typedef struct {
+        float freq;
+        uint32_t duration;
+    } Note;
+	// Acquire speaker before use
+    if(!furi_hal_speaker_acquire(1000)) { // Failed to acquire speaker, exit      
+       return;
+    }
+    
+    Note melody[] = {
+        // Measure 1: E4, C5, E5, C5, E5
+        {329.63f, 454},  // E4 quarter
+        {523.25f, 227},  // C5 eighth
+        {659.25f, 227},  // E5 eighth
+        {523.25f, 227},  // C5 eighth
+        {659.25f, 227},  // E5 eighth
+        
+        // Measure 2: B4 (dotted half)
+        {493.88f, 1364}, // B4 dotted half
+        
+        // Measure 3: B4, C5, E5, C5, E5
+        {493.88f, 454},  // B4 quarter
+        {523.25f, 227},  // C5 eighth
+        {659.25f, 227},  // E5 eighth
+        {523.25f, 227},  // C5 eighth
+        {659.25f, 227},  // E5 eighth
+        
+        // Measure 4: B4 (dotted half)
+        {493.88f, 1364}  // B4 dotted half
+    };
+  
+    for(size_t i = 0; i < COUNT_OF(melody); i++) {
+        furi_hal_speaker_start(melody[i].freq, 1.0f);
+        furi_delay_ms(melody[i].duration * 0.9);
+        
+        furi_hal_speaker_stop();
+        furi_delay_ms(melody[i].duration * 0.1);
+    }
+    
+    furi_hal_speaker_stop();
+    furi_hal_speaker_release();
+}
+
+// Thread function to play melody without blocking
+static int32_t melody_thread(void* context) {
+    UNUSED(context);
+    play_melody();
+    return 0;
+}
+
+// Helper function to start melody in background thread, and clean up automatically
+static void play_melody_async(GameState* state) {
+    // If a melody is already playing, don't start another
+    if(state->melody_thread != NULL) {
+        if(furi_thread_get_state(state->melody_thread) != FuriThreadStateStopped) {
+            return; // Thread still running
+        }
+        // Clean up old thread
+        furi_thread_free(state->melody_thread);
+        state->melody_thread = NULL;
+    }
+    // Create and start new thread
+    state->melody_thread = furi_thread_alloc();
+    furi_thread_set_name(state->melody_thread, "MelodyThread");
+    furi_thread_set_stack_size(state->melody_thread, 2048);
+    furi_thread_set_callback(state->melody_thread, melody_thread);
+    furi_thread_start(state->melody_thread);
 }
 
 // Initialize the collision grid
@@ -553,6 +629,7 @@ int32_t panis_main(void* p) {
     state->last_jump_time = 0;
     state->notifications = furi_record_open(RECORD_NOTIFICATION);
     state->grid_view_enabled = false;  // Grid view starts disabled
+	state->melody_thread = NULL;  // No melody thread initially
     
     // Initialize collision grid
     init_grid(state);
@@ -585,6 +662,11 @@ int32_t panis_main(void* p) {
                     state->grid_view_enabled = false;
                 }
             }
+			
+            // Handle OK button to play melody
+            if(event.key == InputKeyOk && event.type == InputTypePress) {
+                play_melody_async(state);
+            }		
             
             // Handle jumping
             if(event.key == InputKeyUp) {
@@ -605,6 +687,20 @@ int32_t panis_main(void* p) {
         
         // Request redraw
         view_port_update(view_port);
+    }
+	
+	// Stop and cleanup melody thread if still running
+    if(state->melody_thread != NULL) {
+        FuriThreadState thread_state = furi_thread_get_state(state->melody_thread);
+        if(thread_state != FuriThreadStateStopped) {
+            // Thread is still running, wait for it with timeout
+            furi_thread_join(state->melody_thread);
+        }
+        // Free the thread
+        if(state->melody_thread != NULL) {
+            furi_thread_free(state->melody_thread);
+            state->melody_thread = NULL;
+        }
     }
     
     // Cleanup
