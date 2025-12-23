@@ -7,6 +7,7 @@ Just a grumpy bread walking and jumping around.
 - **Up (single press):** Small jump (~25px high)
 - **Up (hold):** Big jump (~50px high)
 - **Back (hold):** Exit game
+- **OK:** Starts playing nice little melody once (seems fragile at the moment)
 - **Down (while it is being held):** Grid overlay appears, x-labels are shown every 5th column.
 
 Panis starts at the left side of the screen. He can move freely from 0px to 64px on the x-axis. Once the, the background starts scrolling instead of Panis moving.
