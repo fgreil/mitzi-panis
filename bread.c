@@ -2,6 +2,7 @@
 #include <gui/gui.h>
 #include <input/input.h>
 #include <notification/notification_messages.h>
+#include <stdlib.h>
 
 // Include generated icon assets
 #include "panis_icons.h"
@@ -36,6 +37,19 @@
 #define START_SCROLL_X (SCREEN_WIDTH / 2)  // Start scrolling at 1/2 screen (64px)
 #define CHAR_START_X (SCREEN_WIDTH / 4)    // Character starts at 1/4 screen (32px)
 
+// Grid configuration
+#define CELL_SIZE 10
+#define GRID_ROWS 6
+#define GRID_COLS 39  // (128*3)/10 = 38.4, so 39 columns
+#define CELL_EMPTY 0
+#define CELL_BLOCK 1
+#define CELL_PILL 2
+
+// Grid generation percentages (as decimals)
+#define PERCENT_PILLS 0.02          // 2% pills
+#define PERCENT_AIR_BLOCKS 0.005    // 0.5% random air blocks
+#define PERCENT_GROUND_BLOCKS 0.02  // ~2% ground/stacked blocks
+
 // Game state structure
 typedef struct {
     int world_x;           // Character's X position in the world (0 to TOTAL_MAP_WIDTH)
@@ -46,9 +60,140 @@ typedef struct {
     int y_pos;             // Character Y position (0 = top)
     int y_velocity;        // Vertical velocity
     bool on_ground;        // True if character is on ground
-	uint32_t last_jump_time;  // Time of last jump press
-	NotificationApp* notifications;  // For vibration feedback
+    uint32_t last_jump_time;  // Time of last jump press
+    NotificationApp* notifications;  // For vibration feedback
+    uint8_t grid[GRID_ROWS][GRID_COLS];  // Collision grid
+    int score;             // Collected pills score
+    int block_count;       // Number of blocks in grid
+    int pill_count;        // Number of pills remaining
 } GameState;
+
+// Helper function for vibration feedback
+static void trigger_vibration(GameState* state) {
+    notification_message(state->notifications, &sequence_single_vibro);
+}
+
+// Initialize the collision grid
+static void init_grid(GameState* state) {
+    // Clear grid
+    for(int row = 0; row < GRID_ROWS; row++) {
+        for(int col = 0; col < GRID_COLS; col++) {
+            state->grid[row][col] = CELL_EMPTY;
+        }
+    }
+    
+    int total_cells = GRID_ROWS * GRID_COLS;
+    int num_pills = (int)(total_cells * PERCENT_PILLS);
+    int num_air_blocks = (int)(total_cells * PERCENT_AIR_BLOCKS);
+    int num_ground_blocks = (int)(total_cells * PERCENT_GROUND_BLOCKS);
+    
+    state->score = 0;
+    state->block_count = 0;
+    state->pill_count = 0;
+    
+    // Place air blocks (random positions in rows 0-4)
+    for(int i = 0; i < num_air_blocks; i++) {
+        int row = rand() % 5;  // Rows 0-4 (not on ground)
+        int col = rand() % GRID_COLS;
+        if(state->grid[row][col] == CELL_EMPTY) {
+            state->grid[row][col] = CELL_BLOCK;
+            state->block_count++;
+        }
+    }
+    
+    // Place ground blocks (on row 5 or stacked)
+    for(int i = 0; i < num_ground_blocks; i++) {
+        int col = rand() % GRID_COLS;
+        // Find lowest empty cell in this column
+        for(int row = GRID_ROWS - 1; row >= 0; row--) {
+            if(state->grid[row][col] == CELL_EMPTY) {
+                state->grid[row][col] = CELL_BLOCK;
+                state->block_count++;
+                break;
+            }
+        }
+    }
+    
+    // Place pills in empty cells
+    int pills_placed = 0;
+    int attempts = 0;
+    while(pills_placed < num_pills && attempts < total_cells * 2) {
+        int row = rand() % GRID_ROWS;
+        int col = rand() % GRID_COLS;
+        if(state->grid[row][col] == CELL_EMPTY) {
+            state->grid[row][col] = CELL_PILL;
+            state->pill_count++;
+            pills_placed++;
+        }
+        attempts++;
+    }
+}
+
+// Get grid cell at world position
+static uint8_t get_cell_at(GameState* state, int world_x, int world_y) {
+    int col = world_x / CELL_SIZE;
+    int row = world_y / CELL_SIZE;
+    
+    if(row < 0 || row >= GRID_ROWS || col < 0 || col >= GRID_COLS) {
+        return CELL_EMPTY;
+    }
+    
+    return state->grid[row][col];
+}
+
+// Check if character collides with a block at given position
+static bool check_block_collision(GameState* state, int world_x, int y_pos) {
+    // Check all four corners of character
+    int left = world_x;
+    int right = world_x + CHAR_WIDTH - 1;
+    int top = y_pos;
+    int bottom = y_pos + CHAR_HEIGHT - 1;
+    
+    // Check corners
+    if(get_cell_at(state, left, top) == CELL_BLOCK) return true;
+    if(get_cell_at(state, right, top) == CELL_BLOCK) return true;
+    if(get_cell_at(state, left, bottom) == CELL_BLOCK) return true;
+    if(get_cell_at(state, right, bottom) == CELL_BLOCK) return true;
+    
+    return false;
+}
+
+// Collect pills at character position
+static void collect_pills(GameState* state) {
+    int left = state->world_x;
+    int right = state->world_x + CHAR_WIDTH - 1;
+    int top = state->y_pos;
+    int bottom = state->y_pos + CHAR_HEIGHT - 1;
+    
+    // Check cells that character overlaps
+    int col_start = left / CELL_SIZE;
+    int col_end = right / CELL_SIZE;
+    int row_start = top / CELL_SIZE;
+    int row_end = bottom / CELL_SIZE;
+    
+    for(int row = row_start; row <= row_end && row < GRID_ROWS; row++) {
+        for(int col = col_start; col <= col_end && col < GRID_COLS; col++) {
+            if(row >= 0 && col >= 0 && state->grid[row][col] == CELL_PILL) {
+                state->grid[row][col] = CELL_EMPTY;
+                state->score += 10;
+                state->pill_count--;
+            }
+        }
+    }
+}
+
+// Check if character can stand on a block
+static bool check_ground_support(GameState* state, int world_x, int y_pos) {
+    // Check one pixel below character's feet
+    int feet_y = y_pos + CHAR_HEIGHT;
+    int left = world_x;
+    int right = world_x + CHAR_WIDTH - 1;
+    
+    if(get_cell_at(state, left, feet_y) == CELL_BLOCK) return true;
+    if(get_cell_at(state, right, feet_y) == CELL_BLOCK) return true;
+    
+    return false;
+}
 
 // Draw callback function
 static void draw_callback(Canvas* canvas, void* ctx) {
@@ -86,19 +231,56 @@ static void draw_callback(Canvas* canvas, void* ctx) {
             canvas_draw_icon(canvas, tile_screen_x, 0, tile_icon);
         }
     }
-	// Draw ground line
-    canvas_draw_line(canvas, 0, GROUND_Y, SCREEN_WIDTH - 1, GROUND_Y);	
+    
+    // Draw grid cells (blocks and pills)
+    for(int row = 0; row < GRID_ROWS; row++) {
+        for(int col = 0; col < GRID_COLS; col++) {
+            if(state->grid[row][col] != CELL_EMPTY) {
+                int world_x = col * CELL_SIZE;
+                int screen_x = world_x - state->camera_x;
+                
+                // Only draw if visible on screen
+                if(screen_x >= -CELL_SIZE && screen_x < SCREEN_WIDTH) {
+                    int y = row * CELL_SIZE;
+                    
+                    if(state->grid[row][col] == CELL_BLOCK) {
+                        // Draw block as filled rectangle
+                        canvas_draw_box(canvas, screen_x, y, CELL_SIZE, CELL_SIZE);
+                    } else if(state->grid[row][col] == CELL_PILL) {
+                        // Draw pill as circle
+                        canvas_draw_disc(canvas, screen_x + CELL_SIZE/2, y + CELL_SIZE/2, 3);
+                    }
+                }
+            }
+        }
+    }
+    
+    // Draw ground line
+    canvas_draw_line(canvas, 0, GROUND_Y, SCREEN_WIDTH - 1, GROUND_Y);
 
     // Draw character PANIS 
     const Icon* char_icon = state->facing_right ? &I_bread_r : &I_bread_l;
     canvas_draw_icon(canvas, state->screen_x, state->y_pos, char_icon);
+
+    // Draw stats in upper right
+    char stats_str[32];
+    canvas_set_font(canvas, FontSecondary);
+    
+    // Blocks count
+    snprintf(stats_str, sizeof(stats_str), "B:%d", state->block_count);
+    int text_width = canvas_string_width(canvas, stats_str);
+    canvas_draw_str(canvas, SCREEN_WIDTH - text_width - 1, 8, stats_str);
+    
+    // Pills collected (score/10)
+    snprintf(stats_str, sizeof(stats_str), "P:%d", state->score / 10);
+    text_width = canvas_string_width(canvas, stats_str);
+    canvas_draw_str(canvas, SCREEN_WIDTH - text_width - 1, 16, stats_str);
 
     // Draw debug info in upper left
     char debug_str[64];
     
     // Line 1: Tiles visible
     snprintf(debug_str, sizeof(debug_str), "T:%d-%d", first_tile, last_tile);
-    canvas_set_font(canvas, FontSecondary);
     canvas_draw_str(canvas, 0, 8, debug_str);
     
     // Line 2: World X position
@@ -126,14 +308,40 @@ static void update_physics(GameState* state) {
             state->y_velocity = MAX_FALL_SPEED;
         }
     }
-    state->y_pos += state->y_velocity; // Update Y position
+    
+    // Try to update Y position
+    int new_y = state->y_pos + state->y_velocity;
+    
     // Limit maximum jump height
     int max_height_y = GROUND_Y - CHAR_HEIGHT - MAX_JUMP_HEIGHT;
-    if(state->y_pos < max_height_y) {
-        state->y_pos = max_height_y;
+    if(new_y < max_height_y) {
+        new_y = max_height_y;
         state->y_velocity = 0;  // Stop upward movement
     }
-	
+    
+    // Check collision with blocks
+    if(state->y_velocity > 0) {  // Falling down
+        // Check if we hit a block below
+        if(check_ground_support(state, state->world_x, new_y - 1)) {
+            // Land on the block
+            int feet_y = new_y + CHAR_HEIGHT;
+            int block_row = feet_y / CELL_SIZE;
+            state->y_pos = block_row * CELL_SIZE - CHAR_HEIGHT;
+            state->y_velocity = 0;
+            state->on_ground = true;
+            return;
+        }
+    } else if(state->y_velocity < 0) {  // Moving up
+        // Check if we hit a block above
+        if(check_block_collision(state, state->world_x, new_y)) {
+            state->y_velocity = 0;
+            trigger_vibration(state);
+            return;
+        }
+    }
+    
+    state->y_pos = new_y;
+    
     // Ground collision
     int ground_pos = GROUND_Y - CHAR_HEIGHT;
     if(state->y_pos >= ground_pos) {
@@ -143,6 +351,9 @@ static void update_physics(GameState* state) {
     } else {
         state->on_ground = false;
     }
+    
+    // Collect any pills at current position
+    collect_pills(state);
 }
 
 // Handle jump input
@@ -161,81 +372,113 @@ static void handle_jump(GameState* state) {
 
 // Update horizontal movement logic
 static void update_game(GameState* state, InputKey key) {   
-	int old_world_x = state->world_x;
+    int old_world_x = state->world_x;
+    int new_world_x = state->world_x;
+    int new_screen_x = state->screen_x;
+    int new_camera_x = state->camera_x;
+    
     if(key == InputKeyRight) {
         state->facing_right = true;
         
         // Check if we can move right
         if(state->world_x < TOTAL_MAP_WIDTH - CHAR_WIDTH) {
+            // Calculate new position
+            new_world_x = state->world_x + MOVEMENT_SPEED;
+            
+            // Check for block collision
+            if(check_block_collision(state, new_world_x, state->y_pos)) {
+                trigger_vibration(state);
+                return;
+            }
+            
             // Determine if we should scroll or move character
             if(state->screen_x >= START_SCROLL_X && 
                state->camera_x < TOTAL_MAP_WIDTH - SCREEN_WIDTH) {
                 // Scroll the world
-                state->camera_x += MOVEMENT_SPEED;
-                state->world_x += MOVEMENT_SPEED;
+                new_camera_x = state->camera_x + MOVEMENT_SPEED;
                 
                 // Clamp camera
-                if(state->camera_x > TOTAL_MAP_WIDTH - SCREEN_WIDTH) {
-                    int overflow = state->camera_x - (TOTAL_MAP_WIDTH - SCREEN_WIDTH);
-                    state->camera_x = TOTAL_MAP_WIDTH - SCREEN_WIDTH;
-                    state->screen_x += overflow;
+                if(new_camera_x > TOTAL_MAP_WIDTH - SCREEN_WIDTH) {
+                    int overflow = new_camera_x - (TOTAL_MAP_WIDTH - SCREEN_WIDTH);
+                    new_camera_x = TOTAL_MAP_WIDTH - SCREEN_WIDTH;
+                    new_screen_x = state->screen_x + overflow;
+                } else {
+                    new_screen_x = state->screen_x;
                 }
             } else {
                 // Move character on screen
-                state->screen_x += MOVEMENT_SPEED;
-                state->world_x += MOVEMENT_SPEED;
+                new_screen_x = state->screen_x + MOVEMENT_SPEED;
+                new_camera_x = state->camera_x;
                 
                 // Clamp to screen edge
-                if(state->screen_x > SCREEN_WIDTH - CHAR_WIDTH) {
-                    state->screen_x = SCREEN_WIDTH - CHAR_WIDTH;
+                if(new_screen_x > SCREEN_WIDTH - CHAR_WIDTH) {
+                    new_screen_x = SCREEN_WIDTH - CHAR_WIDTH;
                 }
             }
             
             // Clamp world position
-            if(state->world_x > TOTAL_MAP_WIDTH - CHAR_WIDTH) {
-                state->world_x = TOTAL_MAP_WIDTH - CHAR_WIDTH;
+            if(new_world_x > TOTAL_MAP_WIDTH - CHAR_WIDTH) {
+                new_world_x = TOTAL_MAP_WIDTH - CHAR_WIDTH;
             }
+            
+            state->world_x = new_world_x;
+            state->screen_x = new_screen_x;
+            state->camera_x = new_camera_x;
         }
     } else if(key == InputKeyLeft) {
         state->facing_right = false;
         
         // Check if we can move left
         if(state->world_x > 0) {
+            // Calculate new position
+            new_world_x = state->world_x - MOVEMENT_SPEED;
+            
+            // Check for block collision
+            if(check_block_collision(state, new_world_x, state->y_pos)) {
+                trigger_vibration(state);
+                return;
+            }
+            
             // Determine if we should scroll or move character
             if(state->screen_x <= START_SCROLL_X && state->camera_x > 0) {
                 // Scroll the world (move camera left)
-                state->camera_x -= MOVEMENT_SPEED;
-                state->world_x -= MOVEMENT_SPEED;
+                new_camera_x = state->camera_x - MOVEMENT_SPEED;
                 
                 // Clamp camera
-                if(state->camera_x < 0) {
-                    int overflow = -state->camera_x;
-                    state->camera_x = 0;
-                    state->screen_x -= overflow;
+                if(new_camera_x < 0) {
+                    int overflow = -new_camera_x;
+                    new_camera_x = 0;
+                    new_screen_x = state->screen_x - overflow;
+                } else {
+                    new_screen_x = state->screen_x;
                 }
             } else {
                 // Move character on screen
-                state->screen_x -= MOVEMENT_SPEED;
-                state->world_x -= MOVEMENT_SPEED;
+                new_screen_x = state->screen_x - MOVEMENT_SPEED;
+                new_camera_x = state->camera_x;
                 
                 // Clamp to screen edge
-                if(state->screen_x < 0) {
-                    state->screen_x = 0;
+                if(new_screen_x < 0) {
+                    new_screen_x = 0;
                 }
             }
             
             // Clamp world position
-            if(state->world_x < 0) {
-                state->world_x = 0;
+            if(new_world_x < 0) {
+                new_world_x = 0;
             }
+            
+            state->world_x = new_world_x;
+            state->screen_x = new_screen_x;
+            state->camera_x = new_camera_x;
         }
     }
-   // Vibrate if we hit a boundary
+    
+    // Vibrate if we hit a boundary
     if((old_world_x != state->world_x) && 
        (state->world_x == 0 || state->world_x == TOTAL_MAP_WIDTH - CHAR_WIDTH)) {
-        notification_message(state->notifications, &sequence_single_vibro);
+        trigger_vibration(state);
     }
-	
 }
 
 // Main application entry point
@@ -255,8 +498,11 @@ int32_t panis_main(void* p) {
     state->y_pos = GROUND_Y - CHAR_HEIGHT;
     state->y_velocity = 0;
     state->on_ground = true;
-	state->last_jump_time = 0;
-	state->notifications = furi_record_open(RECORD_NOTIFICATION);
+    state->last_jump_time = 0;
+    state->notifications = furi_record_open(RECORD_NOTIFICATION);
+    
+    // Initialize collision grid
+    init_grid(state);
     
     // Set up view port
     ViewPort* view_port = view_port_alloc();
@@ -304,7 +550,7 @@ int32_t panis_main(void* p) {
     gui_remove_view_port(gui, view_port);
     view_port_free(view_port);
     furi_record_close(RECORD_GUI);
-	furi_record_close(RECORD_NOTIFICATION);
+    furi_record_close(RECORD_NOTIFICATION);
     furi_message_queue_free(event_queue);
     free(state);
     
