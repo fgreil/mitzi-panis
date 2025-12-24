@@ -45,8 +45,11 @@
 #define CELL_EMPTY 0
 #define CELL_BLOCK 1
 #define CELL_PILL 2
+#define CELL_DIAMOND 3
+#define CELL_DIAMOND_FILLED 4
 
 // Grid generation percentages (as decimals)
+#define SKY_ROW_THRESHOLD 2         // Rows 0-1 are "sky" rows
 #define PERCENT_PILLS 0.02          // 2% pills
 #define PERCENT_AIR_BLOCKS 0.005    // 0.5% random air blocks
 #define PERCENT_GROUND_BLOCKS 0.02  // ~2% ground/stacked blocks
@@ -67,6 +70,10 @@ typedef struct {
     int score;             // Collected pills score
     int block_count;       // Number of blocks in grid
     int pill_count;        // Number of pills remaining
+    int overall_pills;     // Total pills placed
+    int overall_diamonds;  // Total diamonds placed
+    int filled_diamonds;   // Number of filled diamonds
+    int ground_blocks;     // Number of blocks on/near ground
     bool grid_view_enabled; // True when down button is held
 	FuriThread* melody_thread; // Thread for playing melody
 } GameState;
@@ -167,6 +174,10 @@ static void init_grid(GameState* state) {
     state->score = 0;
     state->block_count = 0;
     state->pill_count = 0;
+    state->overall_pills = 0;
+    state->overall_diamonds = 0;
+    state->filled_diamonds = 0;
+    state->ground_blocks = 0;    
     
     // Place air blocks (random positions in rows 0-4)
     for(int i = 0; i < num_air_blocks; i++) {
@@ -186,6 +197,7 @@ static void init_grid(GameState* state) {
             if(state->grid[row][col] == CELL_EMPTY) {
                 state->grid[row][col] = CELL_BLOCK;
                 state->block_count++;
+				state->ground_blocks++;
                 break;
             }
         }
@@ -200,9 +212,24 @@ static void init_grid(GameState* state) {
         if(state->grid[row][col] == CELL_EMPTY) {
             state->grid[row][col] = CELL_PILL;
             state->pill_count++;
+			state->overall_pills++;
             pills_placed++;
         }
         attempts++;
+    }
+	
+	 // Place diamonds below pills in sky rows (0-1)
+    for(int row = 0; row < SKY_ROW_THRESHOLD; row++) {
+        for(int col = 0; col < GRID_COLS; col++) {
+            if(state->grid[row][col] == CELL_PILL) {
+                // Place diamond in cell below if empty
+                int below_row = row + 1;
+                if(below_row < GRID_ROWS && state->grid[below_row][col] == CELL_EMPTY) {
+                    state->grid[below_row][col] = CELL_DIAMOND;
+					state->overall_diamonds++;
+                }
+            }
+        }
     }
 }
 
@@ -257,6 +284,18 @@ static void collect_pills(GameState* state) {
             }
         }
     }
+	// Fill diamonds when jumping through them
+    for(int row = row_start; row <= row_end && row < GRID_ROWS; row++) {
+        for(int col = col_start; col <= col_end && col < GRID_COLS; col++) {
+            if(row >= 0 && col >= 0 && state->grid[row][col] == CELL_DIAMOND) {
+                if(!state->on_ground) {  // Only fill when jumping/falling
+                    state->grid[row][col] = CELL_DIAMOND_FILLED;
+					state->filled_diamonds++;
+                }
+            }
+        }
+     }
+	
 }
 
 // Check if character can stand on a block
@@ -377,47 +416,66 @@ static void draw_callback(Canvas* canvas, void* ctx) {
                     } else if(state->grid[row][col] == CELL_PILL) {
                         // Draw pill as circle
                         canvas_draw_disc(canvas, screen_x + CELL_SIZE/2, y + CELL_SIZE/2, 3);
-                    }
+                    } else if(state->grid[row][col] == CELL_DIAMOND || 
+                              state->grid[row][col] == CELL_DIAMOND_FILLED) {
+                        // Draw kite/diamond shape with 2px linewidth
+                        int cx = screen_x + CELL_SIZE/2;
+                        int cy = y + CELL_SIZE/2;
+                        
+                        // Draw diamond outline with double lines for 2px effect
+                        canvas_draw_line(canvas, cx, cy - 3, cx + 3, cy);
+                        canvas_draw_line(canvas, cx, cy - 4, cx + 4, cy);
+                        
+                        canvas_draw_line(canvas, cx + 3, cy, cx, cy + 3);
+                        canvas_draw_line(canvas, cx + 4, cy, cx, cy + 4);
+                        
+                        canvas_draw_line(canvas, cx, cy + 3, cx - 3, cy);
+                        canvas_draw_line(canvas, cx, cy + 4, cx - 4, cy);
+                        
+                        canvas_draw_line(canvas, cx - 3, cy, cx, cy - 3);
+                        canvas_draw_line(canvas, cx - 4, cy, cx, cy - 4);
+                        
+                        if(state->grid[row][col] == CELL_DIAMOND_FILLED) {
+                            // Fill the diamond
+                            canvas_draw_line(canvas, cx - 2, cy, cx + 2, cy);
+                            canvas_draw_line(canvas, cx - 1, cy - 1, cx + 1, cy - 1);
+                            canvas_draw_line(canvas, cx - 1, cy + 1, cx + 1, cy + 1);
+                            canvas_draw_dot(canvas, cx, cy - 2);
+                            canvas_draw_dot(canvas, cx, cy + 2);
+                        }
+					}
                 }
             }
         }
     }
-    
-    // Draw ground line
-    canvas_draw_line(canvas, 0, GROUND_Y, SCREEN_WIDTH - 1, GROUND_Y);
+	// Draw solid ground box
+    canvas_draw_box(canvas, 0, GROUND_Y, SCREEN_WIDTH, SCREEN_HEIGHT - GROUND_Y);
 
     // Draw character PANIS 
     const Icon* char_icon = state->facing_right ? &I_bread_r : &I_bread_l;
     canvas_draw_icon(canvas, state->screen_x, state->y_pos, char_icon);
 
-    // Draw stats in upper right
+    // Draw stats at top 
     char stats_str[32];
     canvas_set_font(canvas, FontSecondary);
-    
-    // Blocks count
-    snprintf(stats_str, sizeof(stats_str), "B:%d", state->block_count);
-    int text_width = canvas_string_width(canvas, stats_str);
-    canvas_draw_str(canvas, SCREEN_WIDTH - text_width - 1, 8, stats_str);
-    
-    // Pills collected (score/10)
-    snprintf(stats_str, sizeof(stats_str), "P:%d", state->score / 10);
-    text_width = canvas_string_width(canvas, stats_str);
-    canvas_draw_str(canvas, SCREEN_WIDTH - text_width - 1, 16, stats_str);
-
-    // Draw debug info in upper left
-    char debug_str[64];
-    
-    // Line 1: Tiles visible
-    snprintf(debug_str, sizeof(debug_str), "T:%d-%d", first_tile, last_tile);
-    canvas_draw_str(canvas, 0, 8, debug_str);
-    
-    // Line 2: World X position
-    snprintf(debug_str, sizeof(debug_str), "WX:%d", state->world_x);
-    canvas_draw_str(canvas, 0, 16, debug_str);
   
-    // Line 3: Screen X position
-    snprintf(debug_str, sizeof(debug_str), "SX:%d", state->screen_x);
-    canvas_draw_str(canvas, 0, 24, debug_str);
+    // Left: Block counter "B: [ground]/[total]"
+    snprintf(stats_str, sizeof(stats_str), "B:%d(%d)", state->ground_blocks, state->block_count);
+    canvas_draw_str(canvas, 1, 7, stats_str);
+    
+    // Center: Diamond counter "D: [filled]/[overall]"
+    snprintf(stats_str, sizeof(stats_str), "D:%d(%d)", state->filled_diamonds, state->overall_diamonds);
+    int text_width = canvas_string_width(canvas, stats_str);
+    canvas_draw_str(canvas, (SCREEN_WIDTH - text_width) / 2, 7, stats_str);
+    
+    // Right: Pill counter "P: [collected]/[overall]"
+    int collected_pills = state->score / 10;
+    snprintf(stats_str, sizeof(stats_str), "P:%d(%d)", collected_pills, state->overall_pills);
+    text_width = canvas_string_width(canvas, stats_str);
+    canvas_draw_str(canvas, SCREEN_WIDTH - text_width - 1, 7, stats_str);
+    
+    // Reset color to black for other drawing
+    canvas_set_color(canvas, ColorBlack);	
 }
 
 // Input callback function
