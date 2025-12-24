@@ -43,5 +43,5 @@ App(
     fap_category="Games",
 
     # Version number
-    fap_version=(0,1,0)
+    fap_version=(0,3,0)
 )
