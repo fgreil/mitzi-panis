@@ -47,12 +47,14 @@
 #define CELL_PILL 2
 #define CELL_DIAMOND 3
 #define CELL_DIAMOND_FILLED 4
+#define CELL_CLOUD 5
 
 // Grid generation percentages (as decimals)
 #define SKY_ROW_THRESHOLD 2         // Rows 0-1 are "sky" rows
 #define PERCENT_PILLS 0.02          // 2% pills
 #define PERCENT_AIR_BLOCKS 0.005    // 0.5% random air blocks
 #define PERCENT_GROUND_BLOCKS 0.02  // ~2% ground/stacked blocks
+#define PERCENT_CLOUDS 0.15         // 15% clouds in sky rows
 
 // Game state structure
 typedef struct {
@@ -177,7 +179,23 @@ static void init_grid(GameState* state) {
     state->overall_pills = 0;
     state->overall_diamonds = 0;
     state->filled_diamonds = 0;
-    state->ground_blocks = 0;    
+    state->ground_blocks = 0;   
+
+    // Place clouds in sky rows only (rows 0-1)
+    int sky_cells = SKY_ROW_THRESHOLD * GRID_COLS;
+    int num_clouds = (int)(sky_cells * PERCENT_CLOUDS);
+    
+    int clouds_placed = 0;
+    int cloud_attempts = 0;
+    while(clouds_placed < num_clouds && cloud_attempts < sky_cells * 2) {
+        int row = rand() % SKY_ROW_THRESHOLD;  // Only rows 0-1
+        int col = rand() % GRID_COLS;
+        if(state->grid[row][col] == CELL_EMPTY) {
+            state->grid[row][col] = CELL_CLOUD;
+            clouds_placed++;
+        }
+        cloud_attempts++;
+    }	
     
     // Place air blocks (random positions in rows 0-4)
     for(int i = 0; i < num_air_blocks; i++) {
@@ -218,6 +236,26 @@ static void init_grid(GameState* state) {
         attempts++;
     }
 	
+	// Create bridge: columns 13-17, rows 3 (two above ground)
+	// First clear any blocks underneath the bridge
+	for(int col = 13; col <= 17; col++) {
+		for(int row = 4; row <= 5; row++) {
+			if(state->grid[row][col] == CELL_BLOCK) {
+				state->block_count--;
+				state->ground_blocks--;
+			}
+			state->grid[row][col] = CELL_EMPTY;
+ 		}
+	}
+	// Place bridge blocks
+	for(int col = 13; col <= 17; col++) {
+		state->grid[3][col] = CELL_BLOCK;
+		state->block_count += 2;
+		// Place diamonds on top of bridge
+		state->grid[2][col] = CELL_DIAMOND_FILLED;
+		state->overall_diamonds++;
+	}
+	
 	 // Place diamonds below pills in sky rows (0-1)
     for(int row = 0; row < SKY_ROW_THRESHOLD; row++) {
         for(int col = 0; col < GRID_COLS; col++) {
@@ -225,7 +263,7 @@ static void init_grid(GameState* state) {
                 // Place diamond in cell below if empty
                 int below_row = row + 1;
                 if(below_row < GRID_ROWS && state->grid[below_row][col] == CELL_EMPTY) {
-                    state->grid[below_row][col] = CELL_DIAMOND;
+                    state->grid[below_row][col] = CELL_DIAMOND_FILLED;
 					state->overall_diamonds++;
                 }
             }
@@ -242,7 +280,8 @@ static uint8_t get_cell_at(GameState* state, int world_x, int world_y) {
         return CELL_EMPTY;
     }
     
-    return state->grid[row][col];
+    // Clouds don't affect collision
+    return (state->grid[row][col] == CELL_CLOUD) ? CELL_EMPTY : state->grid[row][col];
 }
 
 // Check if character collides with a block at given position
@@ -284,12 +323,12 @@ static void collect_pills(GameState* state) {
             }
         }
     }
-	// Fill diamonds when jumping through them
+	// Empty diamonds when jumping through them
     for(int row = row_start; row <= row_end && row < GRID_ROWS; row++) {
         for(int col = col_start; col <= col_end && col < GRID_COLS; col++) {
-            if(row >= 0 && col >= 0 && state->grid[row][col] == CELL_DIAMOND) {
+            if(row >= 0 && col >= 0 && state->grid[row][col] == CELL_DIAMOND_FILLED) {
                 if(!state->on_ground) {  // Only fill when jumping/falling
-                    state->grid[row][col] = CELL_DIAMOND_FILLED;
+                    state->grid[row][col] = CELL_DIAMOND;
 					state->filled_diamonds++;
                 }
             }
@@ -398,11 +437,26 @@ static void draw_callback(Canvas* canvas, void* ctx) {
     if(state->grid_view_enabled) {
         draw_grid_overlay(canvas, state);
     }
+    // Draw clouds first (so they appear behind everything else)
+    for(int row = 0; row < GRID_ROWS; row++) {
+        for(int col = 0; col < GRID_COLS; col++) {
+            if(state->grid[row][col] == CELL_CLOUD) {
+                int world_x = col * CELL_SIZE;
+                int screen_x = world_x - state->camera_x;
+                
+                // Only draw if visible on screen
+                if(screen_x >= -CELL_SIZE && screen_x < SCREEN_WIDTH) {
+                    int y = row * CELL_SIZE;
+                    canvas_draw_icon(canvas, screen_x, y, &I_cloud);
+                }
+            }
+        }
+    }	
     
     // Draw grid cells (blocks and pills)
     for(int row = 0; row < GRID_ROWS; row++) {
         for(int col = 0; col < GRID_COLS; col++) {
-            if(state->grid[row][col] != CELL_EMPTY) {
+            if(state->grid[row][col] != CELL_EMPTY && state->grid[row][col] != CELL_CLOUD) {
                 int world_x = col * CELL_SIZE;
                 int screen_x = world_x - state->camera_x;
                 
@@ -416,34 +470,11 @@ static void draw_callback(Canvas* canvas, void* ctx) {
                     } else if(state->grid[row][col] == CELL_PILL) {
                         // Draw pill as circle
                         canvas_draw_disc(canvas, screen_x + CELL_SIZE/2, y + CELL_SIZE/2, 3);
-                    } else if(state->grid[row][col] == CELL_DIAMOND || 
-                              state->grid[row][col] == CELL_DIAMOND_FILLED) {
-                        // Draw kite/diamond shape with 2px linewidth
-                        int cx = screen_x + CELL_SIZE/2;
-                        int cy = y + CELL_SIZE/2;
-                        
-                        // Draw diamond outline with double lines for 2px effect
-                        canvas_draw_line(canvas, cx, cy - 3, cx + 3, cy);
-                        canvas_draw_line(canvas, cx, cy - 4, cx + 4, cy);
-                        
-                        canvas_draw_line(canvas, cx + 3, cy, cx, cy + 3);
-                        canvas_draw_line(canvas, cx + 4, cy, cx, cy + 4);
-                        
-                        canvas_draw_line(canvas, cx, cy + 3, cx - 3, cy);
-                        canvas_draw_line(canvas, cx, cy + 4, cx - 4, cy);
-                        
-                        canvas_draw_line(canvas, cx - 3, cy, cx, cy - 3);
-                        canvas_draw_line(canvas, cx - 4, cy, cx, cy - 4);
-                        
-                        if(state->grid[row][col] == CELL_DIAMOND_FILLED) {
-                            // Fill the diamond
-                            canvas_draw_line(canvas, cx - 2, cy, cx + 2, cy);
-                            canvas_draw_line(canvas, cx - 1, cy - 1, cx + 1, cy - 1);
-                            canvas_draw_line(canvas, cx - 1, cy + 1, cx + 1, cy + 1);
-                            canvas_draw_dot(canvas, cx, cy - 2);
-                            canvas_draw_dot(canvas, cx, cy + 2);
-                        }
-					}
+                    } else if(state->grid[row][col] == CELL_DIAMOND) {
+                        canvas_draw_icon(canvas, screen_x, y, &I_diamond_empty);
+                    } else if(state->grid[row][col] == CELL_DIAMOND_FILLED) {
+                        canvas_draw_icon(canvas, screen_x, y, &I_diamond_full);
+                    }
                 }
             }
         }
